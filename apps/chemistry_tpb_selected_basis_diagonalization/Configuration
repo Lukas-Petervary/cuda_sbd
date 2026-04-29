@@ -1,13 +1,24 @@
 # Path to the SBD library
 SBD_PATH=../..
 
+# CUDA compiler options
+CUDACOM= nvcc
+PROF_CUDACOM= nvcc
+CUDA_ARCH= sm_60
+CUDAFLAGS= -c -O3 -std=c++17 -I$(SBD_INCLUDE_DIR) -Xcompiler -fPIC -DBLOCK_SIZE=128
+# CUDA_ARCH= $(shell nvcc --list-gpu-arch 2>/dev/null | head -1 | sed 's/-arch=//' || echo "sm_60")
+
 # mpi c++ compiler
-CCCOM=mpicxx
+CCCOM= mpicxx
+PROF_CCCOM= scorep mpicxx
 # CCCOM=/opt/nvidia/hpc_sdk/Linux_x86_64/2025/comm_libs/mpi/bin/mpic++
 
-# flags for build: include path to openmp. The following is the case using homebrew's llvm on Mac
-CCFLAGS= -std=c++17 -stdlib=libc++ -fopenmp -I/opt/homebrew/opt/llvm/include -O3
+# custom
+CCFLAGS= -std=c++17 -fopenmp -O3 -DKERNEL_EXCITATION -DSBD_DEBUG_MULT
+SYSLIB= -lopenblas -llapack
 
+# flags for build: include path to openmp. The following is the case using homebrew's llvm on Mac
+# CCFLAGS= -std=c++17 -stdlib=libc++ -fopenmp -I/opt/homebrew/opt/llvm/include -O3
 
 # accelerate using Thrust
 # CCFLAGS= -mp -cuda -fast -Minfo=accel --diag_suppress declared_but_not_referenced,set_but_not_used -fmax-errors=0 -I/opt/nvidia/hpc_sdk/Linux_x86_64/2025/cuda/include/cccl -I/usr/local/cuda/include -DSBD_THRUST
@@ -20,11 +31,11 @@ CCFLAGS= -std=c++17 -stdlib=libc++ -fopenmp -I/opt/homebrew/opt/llvm/include -O3
 # CCFLAGS= -cuda -Minfo=accel -gpu=mem:unified --diag_suppress declared_but_not_referenced,set_but_not_used -fmax-errors=0 -I/opt/nvidia/hpc_sdk/Linux_x86_64/2025/cuda/include/cccl -I/usr/local/cuda/include -DSBD_THRUST
 
 # CPU run
-#CCFLAGS= -mp --diag_suppress declared_but_not_referenced,set_but_not_used -fmax-errors=0 -I/opt/nvidia/hpc_sdk/Linux_x86_64/2025/cuda/include/cccl -I/usr/local/cuda/include -DSBD_DEBUG_MULT
+# CCFLAGS= -mp --diag_suppress declared_but_not_referenced,set_but_not_used -fmax-errors=0 -I/opt/nvidia/hpc_sdk/Linux_x86_64/2025/cuda/include/cccl -I/usr/local/cuda/include -DSBD_DEBUG_MULT
 
 
 # flags for linking: include link to lapack and blas. The following s the case using homebrew's openblas on Mac
-SYSLIB= -L/opt/homebrew/opt/openblas/lib -llapack -lblas
+# SYSLIB= -L/opt/homebrew/opt/openblas/lib -llapack -lblas
 # SYSLIB= -llapack -lblas
 
 ### Example for the Fugaku
