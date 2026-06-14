@@ -1,6 +1,6 @@
 include Configuration
 SBD_INCLUDE_DIR=$(SBD_PATH)/include
-LIBFLAGS= $(SYSLIB) -lcudart
+LIBFLAGS= $(SYSLIB)
 MAKEFILES= Makefile Configuration
 
 # CUDA source and object files
@@ -58,24 +58,21 @@ check-cuda:
 	@nvidia-smi --query-gpu=name,compute_cap --format=csv | head -2
 
 ###############################################################
-run-diag: diag
-	@echo "Compiling and running optimized workflow"
-	mpirun -np 16 -x OMP_NUM_THREADS=1 ./diag --fcidump fcidump_Fe4S4.txt --adetfile AlphaDets.txt \
-       --method 0 --block 10 --iteration 2 --tolerance 1.0e-4 \
-       --adet_comm_size 2 --bdet_comm_size 2 --task_comm_size 2 \
-       --init 0 --shuffle 0 --carryover_type 0 --rdm 0
+run:
+	mpirun -np 1 -x OMP_NUM_THREADS=1 ./diag --fcidump fcidump_Fe4S4.txt --adetfile AlphaDets.txt \
+           --method 0 --block 10 --iteration 4 --tolerance 1.0e-4 \
+           --adet_comm_size 1 --bdet_comm_size 1 --task_comm_size 1 \
+           --init 0 --shuffle 0 --carryover_type 0 --rdm 0
 
-run-profile: profile
-	@echo "Set SCOREP_ENABLE_TRACING=true for tracing"
-	mpirun -np 16 -x OMP_NUM_THREADS=1 ./diag --fcidump fcidump_Fe4S4.txt --adetfile AlphaDets.txt \
-       --method 0 --block 10 --iteration 2 --tolerance 1.0e-4 \
-       --adet_comm_size 2 --bdet_comm_size 2 --task_comm_size 2 \
-       --init 0 --shuffle 0 --carryover_type 0 --rdm 0
+run-diag: diag run
+run-profile: profile run
 
+###############################################################
 help:
 	@echo "Available targets:"
 	@echo "  make diag         - Build with CUDA support (default)"
 	@echo "  make profile      - Build with Score-P instrumentation + CUDA"
+	@echo "  make run          - Run compiled targets with preset parameters"
 	@echo "  make run-diag     - Build and run optimized workflow"
 	@echo "  make run-profile  - Build and run profiling test"
 	@echo "  make clean        - Remove all build artifacts"
@@ -90,4 +87,4 @@ help:
 	@echo ""
 	@echo "For detailed profiling:"
 	@echo "  export SCOREP_ENABLE_TRACING=true"
-	@echo "  mpirun -np 16 ./diag [your arguments]"
+	@echo "  make run"

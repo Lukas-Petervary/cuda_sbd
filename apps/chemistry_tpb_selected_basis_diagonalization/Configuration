@@ -8,20 +8,27 @@ CUDA_ARCH= sm_60
 CUDAFLAGS= -c -O3 -std=c++17 -I$(SBD_INCLUDE_DIR) -Xcompiler -fPIC -DBLOCK_SIZE=128
 # CUDA_ARCH= $(shell nvcc --list-gpu-arch 2>/dev/null | head -1 | sed 's/-arch=//' || echo "sm_60")
 
+# AiMOS Conf
+export BLAS_HOME=/gpfs/u/home/QCSC/QCSCrsdd/scratch-shared/osama/lib/openblas
+
 # mpi c++ compiler
 CCCOM= mpicxx
 PROF_CCCOM= scorep mpicxx
-# CCCOM=/opt/nvidia/hpc_sdk/Linux_x86_64/2025/comm_libs/mpi/bin/mpic++
 
-# custom
-CCFLAGS= -std=c++17 -fopenmp -O3 -DKERNEL_EXCITATION -DSBD_DEBUG_MULT
-SYSLIB= -lopenblas -llapack
+# compiler & library
+CCFLAGS= -std=c++17 -fopenmp -O3 -DKERNEL_EXCITATION #-DSBD_DEBUG_MULT
+SYSLIB= -lopenblas -lcudart -llapack
 
-# flags for build: include path to openmp. The following is the case using homebrew's llvm on Mac
-# CCFLAGS= -std=c++17 -stdlib=libc++ -fopenmp -I/opt/homebrew/opt/llvm/include -O3
+# CCFLAGS= -std=c++17 -fopenmp -O3 \
+#   -I$(BLAS_HOME)/include \
+#   -DKERNEL_EXCITATION #-DSBD_DEBUG_MULT
+
+# SYSLIB= -L$(BLAS_HOME)/lib -lopenblas -L$(CUDA_HOME)/lib64 -lcudart -lm -lgfortran
+
+
 
 # accelerate using Thrust
-# CCFLAGS= -mp -cuda -fast -Minfo=accel --diag_suppress declared_but_not_referenced,set_but_not_used -fmax-errors=0 -I/opt/nvidia/hpc_sdk/Linux_x86_64/2025/cuda/include/cccl -I/usr/local/cuda/include -DSBD_THRUST
+# CCFLAGS= -mp -cuda -fast -Minfo=accel --diag_suppress declared_but_not_referenced,set_but_not_used -fmax-errors=0 -DSBD_THRUST -noswitcherror -std=c++17
 #-DSBD_PREFECT
 #-DSBD_DEBUG_MULT
 #-DSBD_THRUST_NO_COLLAPSE

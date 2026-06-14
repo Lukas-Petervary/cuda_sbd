@@ -367,23 +367,24 @@ namespace sbd {
 
 #else
     template<typename ElemT>
-    void mult(const std::vector <ElemT> &hii,
-              const std::vector <ElemT> &Wk,
-              std::vector <ElemT> &Wb,
-              const std::vector <std::vector<size_t>> &adets,
-              const std::vector <std::vector<size_t>> &bdets,
-              const size_t bit_length,
-              const size_t norbs,
-              const size_t adet_comm_size,
-              const size_t bdet_comm_size,
-              const std::vector <TaskHelpers> &helper,
-              const ElemT &I0,
-              const oneInt <ElemT> &I1,
-              const twoInt <ElemT> &I2,
-              MPI_Comm h_comm,
-              MPI_Comm b_comm,
-              MPI_Comm t_comm) {
-
+    void mult(
+            const std::vector <ElemT> &hii,
+            const std::vector <ElemT> &Wk,
+            std::vector <ElemT> &Wb,
+            const std::vector <std::vector<size_t>> &adets,
+            const std::vector <std::vector<size_t>> &bdets,
+            const size_t bit_length,
+            const size_t norbs,
+            const size_t adet_comm_size,
+            const size_t bdet_comm_size,
+            const std::vector <TaskHelpers> &helper,
+            const ElemT &I0,
+            const oneInt <ElemT> &I1,
+            const twoInt <ElemT> &I2,
+            MPI_Comm h_comm,
+            MPI_Comm b_comm,
+            MPI_Comm t_comm
+    ) {
 #ifdef SBD_DEBUG_TUNING
         std::cout << " multiplication with round-robin assignment of work to OpenMP threads " << std::endl;
 #endif
@@ -461,33 +462,6 @@ namespace sbd {
             }
             std::cout << std::endl;
 #endif
-#ifdef KERNEL_EXCITATION
-            std::vector<uint64_t> dets_flat;
-            std::vector<cuda_impl::Excitation> excitations;
-            int detWords;
-
-            cuda_impl::FlattenExcitations<ElemT>(
-                    adets, bdets, helper,
-                    bit_length, norbs,
-                    braAlphaSize, braBetaSize,
-                    dets_flat,
-                    excitations,
-                    detWords
-            );
-
-            cuda_impl::davidsonMatvecGPU<ElemT>(
-                    mpi_rank_h,
-                    dets_flat,
-                    detWords,
-                    excitations,
-                    I1.store.data(),
-                    I2.store.data(),
-                    I1.norbs,
-                    bit_length,
-                    T,
-                    Wb
-            );
-#else
             size_t ketAlphaSize = helper[task].ketAlphaEnd - helper[task].ketAlphaStart;
             size_t ketBetaSize = helper[task].ketBetaEnd - helper[task].ketBetaStart;
 
@@ -630,7 +604,6 @@ namespace sbd {
                 } // if ( helper[task].taskType == ? )
 
             } // end pragma paralell
-#endif
 
             if (helper[task].taskType == 0 && task != helper.size() - 1) {
 #ifdef SBD_DEBUG_MULT
@@ -683,6 +656,150 @@ namespace sbd {
 #endif
 
     } // end function
+
+#ifdef KERNEL_EXCITATION
+    template<typename ElemT>
+    void gpuMult(const std::vector <ElemT> &hii,
+                 const std::vector <ElemT> &Wk,
+                 std::vector <ElemT> &Wb,
+                 const std::vector <std::vector<size_t>> &adets,
+                 const std::vector <std::vector<size_t>> &bdets,
+                 const size_t bit_length,
+                 const size_t norbs,
+                 const size_t adet_comm_size,
+                 const size_t bdet_comm_size,
+                 const std::vector <TaskHelpers> &helper,
+                 const ElemT &I0,
+                 const oneInt <ElemT> &I1,
+                 const twoInt <ElemT> &I2,
+                 MPI_Comm h_comm,
+                 MPI_Comm b_comm,
+                 MPI_Comm t_comm,
+                 cuda_impl::DavidsonGpuContext<ElemT>& gpu_ctx
+    ) {
+
+#ifdef SBD_DEBUG_TUNING
+        std::cout << " multiplication with round-robin assignment of work to OpenMP threads " << std::endl;
+#endif
+
+        int mpi_rank_h = 0;
+        int mpi_size_h = 1;
+        MPI_Comm_rank(h_comm, &mpi_rank_h);
+        MPI_Comm_size(h_comm, &mpi_size_h);
+
+        int mpi_size_b;
+        MPI_Comm_size(b_comm, &mpi_size_b);
+        int mpi_rank_b;
+        MPI_Comm_rank(b_comm, &mpi_rank_b);
+        int mpi_size_t;
+        MPI_Comm_size(t_comm, &mpi_size_t);
+        int mpi_rank_t;
+        MPI_Comm_rank(t_comm, &mpi_rank_t);
+        size_t braAlphaSize = 0;
+        size_t braBetaSize = 0;
+        if (helper.size() != 0) {
+            braAlphaSize = helper[0].braAlphaEnd - helper[0].braAlphaStart;
+            braBetaSize = helper[0].braBetaEnd - helper[0].braBetaStart;
+        }
+
+        size_t adet_min = 0;
+        size_t adet_max = adets.size();
+        size_t bdet_min = 0;
+        size_t bdet_max = bdets.size();
+        get_mpi_range(adet_comm_size, 0, adet_min, adet_max);
+        get_mpi_range(bdet_comm_size, 0, bdet_min, bdet_max);
+        size_t max_det_size = (adet_max - adet_min) * (bdet_max - bdet_min);
+
+        int num_threads = 1;
+
+        auto time_copy_start = std::chrono::high_resolution_clock::now();
+        std::vector <ElemT> T;
+        std::vector <ElemT> R;
+        T.reserve(max_det_size);
+        R.reserve(max_det_size);
+        if (helper.size() != 0) {
+            Mpi2dSlide(Wk, T, adet_comm_size, bdet_comm_size,
+                       -helper[0].adetShift, -helper[0].bdetShift, b_comm);
+        }
+        auto time_copy_end = std::chrono::high_resolution_clock::now();
+
+        auto time_mult_start = std::chrono::high_resolution_clock::now();
+
+        num_threads = omp_get_max_threads();
+
+        if (mpi_rank_t == 0) {
+#pragma omp parallel for
+            for (size_t i = 0; i < T.size(); i++) {
+                Wb[i] += hii[i] * T[i];
+            }
+        }
+
+#ifdef SBD_DEBUG_MULT
+        std::cout << " End multiplication of diagonal term at mpi process (h,b,t) = ("
+              << mpi_rank_h << "," << mpi_rank_b << "," << mpi_rank_t << ")" << std::endl;
+#endif
+
+        // ---- GPU off-diagonal H*T (single call, all excitations) ----
+        // All excitations were built against the initial T layout at
+        // initialization time. Calling the kernel more than once would
+        // accumulate the full off-diagonal contribution multiple times.
+        cuda_impl::davidsonMatvecGPU<ElemT>( gpu_ctx, T, Wb );
+
+        // ---- MPI slide loop (no GPU work inside) ----
+        // For single-node deployments (adet_comm_size = bdet_comm_size = 1)
+        // every Mpi2dSlide below is a no-op. For multi-node, the slides
+        // redistribute T across ranks between tasks; the GPU path in that
+        // case would need per-task excitation partitioning (future work).
+        double time_slid = 0.0;
+        for (size_t task = 0; task < helper.size(); task++) {
+            if (helper[task].taskType == 0 && task != helper.size() - 1) {
+#ifdef SBD_DEBUG_MULT
+                size_t adet_rank      = mpi_rank_b / bdet_comm_size;
+                size_t bdet_rank      = mpi_rank_b % bdet_comm_size;
+                size_t adet_rank_task = (adet_rank+helper[task].adetShift)   % adet_comm_size;
+                size_t bdet_rank_task = (bdet_rank+helper[task].bdetShift)   % bdet_comm_size;
+                size_t adet_rank_next = (adet_rank+helper[task+1].adetShift) % adet_comm_size;
+                size_t bdet_rank_next = (bdet_rank+helper[task+1].bdetShift) % bdet_comm_size;
+                std::cout << " gpuMult: task " << task
+                          << " slide from (" << adet_rank_task << "," << bdet_rank_task
+                          << ") to ("        << adet_rank_next << "," << bdet_rank_next
+                          << ")" << std::endl;
+#endif
+                int adetslide = helper[task].adetShift - helper[task + 1].adetShift;
+                int bdetslide = helper[task].bdetShift - helper[task + 1].bdetShift;
+                R.resize(T.size());
+                std::memcpy(R.data(), T.data(), T.size() * sizeof(ElemT));
+                auto time_slid_start = std::chrono::high_resolution_clock::now();
+                Mpi2dSlide(R, T, adet_comm_size, bdet_comm_size,
+                           adetslide, bdetslide, b_comm);
+                auto time_slid_end = std::chrono::high_resolution_clock::now();
+                time_slid += 1.0e-6 * std::chrono::duration_cast<
+                        std::chrono::microseconds>(time_slid_end - time_slid_start).count();
+            }
+        } // end task loop (slide logic only)
+
+        auto time_mult_end = std::chrono::high_resolution_clock::now();
+
+        auto time_comm_start = std::chrono::high_resolution_clock::now();
+        MpiAllreduce(Wb, MPI_SUM, t_comm);
+        MpiAllreduce(Wb, MPI_SUM, h_comm);
+        auto time_comm_end = std::chrono::high_resolution_clock::now();
+
+#ifdef SBD_DEBUG_MULT
+        auto time_copy_count = std::chrono::duration_cast<std::chrono::microseconds>(time_copy_end-time_copy_start).count();
+        auto time_mult_count = std::chrono::duration_cast<std::chrono::microseconds>(time_mult_end-time_mult_start).count();
+        auto time_comm_count = std::chrono::duration_cast<std::chrono::microseconds>(time_comm_end-time_comm_start).count();
+
+        double time_copy = 1.0e-6 * time_copy_count;
+        double time_mult = 1.0e-6 * time_mult_count;
+        double time_comm = 1.0e-6 * time_comm_count;
+        std::cout << " mult: time for first copy     = " << time_copy << std::endl;
+        std::cout << " mult: time for multiplication = " << time_mult << std::endl;
+        std::cout << " mult: time for 2d slide comm  = " << time_slid << std::endl;
+        std::cout << " mult: time for allreduce comm = " << time_comm << std::endl;
+#endif
+    }
+#endif // KERNEL_EXCITATION
 
 #endif // SBD_TRADMODE
 
