@@ -739,17 +739,8 @@ namespace sbd {
               << mpi_rank_h << "," << mpi_rank_b << "," << mpi_rank_t << ")" << std::endl;
 #endif
 
-        // ---- GPU off-diagonal H*T (single call, all excitations) ----
-        // All excitations were built against the initial T layout at
-        // initialization time. Calling the kernel more than once would
-        // accumulate the full off-diagonal contribution multiple times.
         cuda_impl::davidsonMatvecGPU<ElemT>( gpu_ctx, T, Wb );
 
-        // ---- MPI slide loop (no GPU work inside) ----
-        // For single-node deployments (adet_comm_size = bdet_comm_size = 1)
-        // every Mpi2dSlide below is a no-op. For multi-node, the slides
-        // redistribute T across ranks between tasks; the GPU path in that
-        // case would need per-task excitation partitioning (future work).
         double time_slid = 0.0;
         for (size_t task = 0; task < helper.size(); task++) {
             if (helper[task].taskType == 0 && task != helper.size() - 1) {

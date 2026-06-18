@@ -1,9 +1,6 @@
 #include "hamiltonian_kernel.h"
 #include <cuda_runtime.h>
 
-// ----------------------------------------------------------------
-// Compile-time tuning knobs
-// ----------------------------------------------------------------
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE 256   // must be a multiple of WARP_SIZE (32)
 #endif
@@ -21,11 +18,6 @@
     } while (0)
 
 namespace cuda_impl {
-
-    // ================================================================
-    // Context lifecycle
-    // ================================================================
-
     template<typename ElemT>
     void DavidsonGpuContext<ElemT>::release() {
         if (d_row_ptr)  { cudaFree(d_row_ptr);  d_row_ptr = nullptr;}
@@ -36,12 +28,6 @@ namespace cuda_impl {
         if (d_T)        { cudaFree(d_T);        d_T = nullptr;      }
         if (d_Wb)       { cudaFree(d_Wb);       d_Wb = nullptr;     }
     }
-
-    // ================================================================
-    // GPU initialization
-    // Uploads CSR structure, bra determinants, and integral tables.
-    // All persistent data lives on the device for the Davidson lifetime.
-    // ================================================================
 
     template<typename ElemT>
     void InitializeDavidsonGPU(
@@ -69,52 +55,41 @@ namespace cuda_impl {
         ctx.nExc = static_cast<int>(csr_exc.size());
         ctx.vecSize = vecSize;
 
-        // Integral table sizes (chemist 8-fold symmetry packing)
         const size_t nPairs = static_cast<size_t>(norbs) * (norbs + 1) / 2;
         const size_t twoSize = nPairs * (nPairs + 1) / 2;
 
-        // ---- CSR row pointers ----
         CUDA_CHECK(cudaMalloc(&ctx.d_row_ptr,
                               csr_row_ptr.size() * sizeof(int)));
         CUDA_CHECK(cudaMemcpy(ctx.d_row_ptr, csr_row_ptr.data(),
                               csr_row_ptr.size() * sizeof(int),
                               cudaMemcpyHostToDevice));
 
-        // ---- CSR excitation data ----
         CUDA_CHECK(cudaMalloc(&ctx.d_exc,
                               csr_exc.size() * sizeof(excitation_t)));
         CUDA_CHECK(cudaMemcpy(ctx.d_exc, csr_exc.data(),
                               csr_exc.size() * sizeof(excitation_t),
                               cudaMemcpyHostToDevice));
 
-        // ---- Bra determinant bitstrings ----
         CUDA_CHECK(cudaMalloc(&ctx.d_dets,
                               dets_flat.size() * sizeof(uint64_t)));
         CUDA_CHECK(cudaMemcpy(ctx.d_dets, dets_flat.data(),
                               dets_flat.size() * sizeof(uint64_t),
                               cudaMemcpyHostToDevice));
 
-        // ---- One-body integrals ----
         CUDA_CHECK(cudaMalloc(&ctx.d_one,
                               static_cast<size_t>(norbs) * norbs * sizeof(ElemT)));
         CUDA_CHECK(cudaMemcpy(ctx.d_one, h_one,
                               static_cast<size_t>(norbs) * norbs * sizeof(ElemT),
                               cudaMemcpyHostToDevice));
 
-        // ---- Two-body integrals ----
         CUDA_CHECK(cudaMalloc(&ctx.d_two, twoSize * sizeof(ElemT)));
         CUDA_CHECK(cudaMemcpy(ctx.d_two, h_two,
                               twoSize * sizeof(ElemT),
                               cudaMemcpyHostToDevice));
 
-        // ---- Working vectors ----
         CUDA_CHECK(cudaMalloc(&ctx.d_T, vecSize * sizeof(ElemT)));
         CUDA_CHECK(cudaMalloc(&ctx.d_Wb, vecSize * sizeof(ElemT)));
     }
-
-    // ================================================================
-    // Device accessor helpers (unchanged from original)
-    // ================================================================
 
     template<typename ElemT>
     struct DeviceOneInt {
@@ -252,41 +227,11 @@ namespace cuda_impl {
         return sgn * (h2(A, I, B, J) - h2(A, J, B, I));
     }
 
-    // ================================================================
-    // CSR warp-per-row matvec kernel
-    //
-    // Dispatch:  one warp (32 threads) per bra row.
-    // Work:      each lane strides through exc[ row_ptr[bra] .. row_ptr[bra+1] )
-    //            with stride WARP_SIZE, accumulating a partial sum.
-    //
-    // Reduction: warp-level tree reduce via __shfl_down_sync.
-    //            Lane 0 writes the final sum with one atomicAdd.
-    //
-    // Memory access characteristics versus the old COO kernel:
-    //   - exc[] reads are coalesced: adjacent lanes read adjacent entries.
-    //   - The bra determinant pointer is warp-uniform → broadcast from L1,
-    //     single transaction per detWords word across all excitation types.
-    //   - Atomic pressure reduced from one-per-excitation to one-per-bra.
-    //   - No intra-warp write conflicts: all lanes accumulate into a
-    //     register before the final reduction.
-    //
-    // Load balance note:
-    //   Warp-per-row works well when row lengths are O(WARP_SIZE).
-    //   If your active space produces highly variable row lengths you may
-    //   want to layer in a block-per-row path for long rows (>256) and a
-    //   thread-per-row path for very short rows (<4).  The segmented CSR
-    //   / merge-path approach (Bell & Garland 2012) is the principled
-    //   fix, but warp-per-row is a large improvement over COO for the
-    //   typical CI excitation density.
-    //
-    // Requires compute capability >= 6.0 for double atomicAdd.
-    // ================================================================
-
     template<typename ElemT>
     __global__ void csr_matvec_kernel(
-            const int *row_ptr,   // [nBras + 1]
-            const excitation_t *exc,       // [nExc]
-            const uint64_t *dets,      // [nBras * detWords]
+            const int *row_ptr,
+            const excitation_t *exc,
+            const uint64_t *dets,
             const ElemT *Tvec,
             ElemT *Wb,
             DeviceOneInt<ElemT> h1,
@@ -295,7 +240,6 @@ namespace cuda_impl {
             int detWords,
             int nBras
     ) {
-        // ---- warp / lane ids ----
         const int globalThread = blockIdx.x * blockDim.x + threadIdx.x;
         const int warpId = globalThread / WARP_SIZE;
         const int laneId = globalThread % WARP_SIZE;
@@ -306,14 +250,9 @@ namespace cuda_impl {
         const int start = row_ptr[braIdx];
         const int end = row_ptr[braIdx + 1];
 
-        // Warp-uniform pointer: all 32 lanes reference the same bra det.
-        // CUDA issues a single memory transaction (warp-uniform load / L1 broadcast).
         const uint64_t *det = dets + static_cast<ptrdiff_t>(braIdx) * detWords;
 
         ElemT lane_sum = ElemT(0);
-
-        // Stride over this bra's excitations with WARP_SIZE to keep
-        // consecutive lanes reading consecutive ExcitationData entries.
         for (int k = start + laneId; k < end; k += WARP_SIZE) {
             const excitation_t e = exc[k];
             ElemT val;
@@ -326,22 +265,13 @@ namespace cuda_impl {
             lane_sum += val * Tvec[e.ketIdx];
         }
 
-        // ---- warp-level tree reduction ----
-        // Reduces lane_sum across all 32 lanes into lane 0.
-        // No shared memory required; register-only.
 #pragma unroll
         for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
             lane_sum += __shfl_down_sync(0xFFFFFFFF, lane_sum, offset);
 
-        // ---- single atomic write per bra (lane 0 only) ----
-        // Down from one atomicAdd per excitation in the COO kernel.
         if (laneId == 0)
             atomicAdd(&Wb[braIdx], lane_sum);
     }
-
-    // ================================================================
-    // Host-side matvec driver
-    // ================================================================
 
     template<typename ElemT>
     void DavidsonMatvecGPU(
@@ -351,22 +281,15 @@ namespace cuda_impl {
     ) {
         CUDA_CHECK(cudaSetDevice(ctx.device));
 
-        // Upload ket vector.
-        // Bug fix: the prior version passed vec_capacity (element count)
-        // where cudaMemcpy expects bytes → silent under-copy for ElemT=double.
         CUDA_CHECK(cudaMemcpy(ctx.d_T, Tvec.data(),
                               ctx.vecSize * sizeof(ElemT),
                               cudaMemcpyHostToDevice));
 
-        // Zero device output buffer.
-        // Bug fix: same sizeof(ElemT) factor was missing in cudaMemset.
         CUDA_CHECK(cudaMemset(ctx.d_Wb, 0, ctx.vecSize * sizeof(ElemT)));
 
         DeviceOneInt<ElemT> dH1{ctx.d_one, ctx.norbs};
         DeviceTwoInt<ElemT> dH2{ctx.d_two, ctx.norbs};
 
-        // Grid: one warp per bra row.
-        // totalThreads = nBras * WARP_SIZE; round up to BLOCK_SIZE boundary.
         const int totalThreads = ctx.nBras * WARP_SIZE;
         const int grid = (totalThreads + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
@@ -384,24 +307,6 @@ namespace cuda_impl {
         );
 
         CUDA_CHECK(cudaDeviceSynchronize());
-
-        // Download and ACCUMULATE into host Wb.
-        //
-        // Bug fix: the prior version overwrote Wb, discarding any CPU
-        // diagonal contribution that gpuMult added before this call.
-        // Using += preserves the diagonal term for mpi_rank_t == 0
-        // and is a no-op for other ranks (where Wb[i] was 0 before the
-        // diagonal add).
-        //
-        // Note: gpuMult currently calls this once per task iteration in
-        // a loop while also sliding T.  Since ALL excitations are baked
-        // into the context at initialization time (using the initial T
-        // layout), calling the kernel with a post-slide T produces
-        // incorrect results for tasks beyond the first.  For single-task
-        // deployments this is fine.  For multi-task multi-node use,
-        // either (a) call davidsonMatvecGPU once before the slide loop
-        // and skip the GPU path inside the loop, or (b) partition the
-        // CSR matrix per-task and process each slide independently.
         std::vector<ElemT> gpu_result(ctx.vecSize);
         CUDA_CHECK(cudaMemcpy(gpu_result.data(), ctx.d_Wb,
                               ctx.vecSize * sizeof(ElemT),
