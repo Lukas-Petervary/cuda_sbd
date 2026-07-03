@@ -59,9 +59,9 @@ check-cuda:
 
 ###############################################################
 run:
-	mpirun -np 1 -x OMP_NUM_THREADS=1 ./diag --fcidump fcidump_Fe4S4.txt --adetfile AlphaDets.txt \
+	mpirun -np 4 -x OMP_NUM_THREADS=1 ./diag --fcidump fcidump_Fe4S4.txt --adetfile AlphaDets.txt \
            --method 0 --block 10 --iteration 4 --tolerance 1.0e-4 \
-           --adet_comm_size 1 --bdet_comm_size 1 --task_comm_size 1 \
+           --adet_comm_size 2 --bdet_comm_size 2 --task_comm_size 1 \
            --init 0 --shuffle 0 --carryover_type 0 --rdm 0
 
 run-diag: diag run

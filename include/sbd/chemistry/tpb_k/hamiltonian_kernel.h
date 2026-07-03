@@ -14,19 +14,20 @@ namespace cuda_impl {
     };
 
     template<typename ElemT>
-    struct DavidsonGpuContext {
+    struct gpuContext_t {
         int device = 0;
+        int nTasks = 0;
 
         // CSR excitation structure
-        int*          d_row_ptr = nullptr;
-        excitation_t* d_exc     = nullptr;
+        std::vector<int*>          d_row_ptr;
+        std::vector<excitation_t*> d_exc;
 
         // Bra determinant bitstrings, row-major: [nBras][detWords]
         uint64_t* d_dets = nullptr;
 
         // Integral tables
-        ElemT* d_one = nullptr;
-        ElemT* d_two = nullptr;
+        ElemT* d_one = nullptr; size_t d_one_size = 0;
+        ElemT* d_two = nullptr; size_t d_two_size = 0;
 
         // Working vectors
         ElemT* d_T  = nullptr;
@@ -36,35 +37,45 @@ namespace cuda_impl {
         int    norbs      = 0;
         int    bit_length = 0;
         int    nBras      = 0;
-        int    nExc       = 0;
         size_t vecSize    = 0;
 
-        ~DavidsonGpuContext() { release(); }
+        int mpi_size_h = 1;
+        int mpi_rank_h = 0;
+
+        ~gpuContext_t() { release(); }
         void release();
     };
 
     template<typename ElemT>
-    void InitializeDavidsonGPU(
-            DavidsonGpuContext<ElemT>&          ctx,
-            int                                 rank,
-            const std::vector<uint64_t>&        dets_flat,
-            int                                 detWords,
-            const std::vector<int>&             csr_row_ptr,
-            const std::vector<excitation_t>&  csr_exc,
-            const ElemT*                        h_one,
-            const ElemT*                        h_two,
-            int                                 norbs,
-            int                                 bit_length,
-            size_t                              vecSize
+    void InitGpuContext(
+            gpuContext_t<ElemT>&                            ctx,
+            int                                             rank_for_device,
+            int                                             mpi_rank_h,
+            int                                             mpi_size_h,
+            const std::vector<uint64_t>&                    dets_flat,
+            int                                             detWords,
+            const std::vector<std::vector<int>>&            csr_row_ptr_per_task,
+            const std::vector<std::vector<excitation_t>>&   csr_exc_per_task,
+            const ElemT*                                    h_one,
+            const size_t&                                   h_one_size,
+            const ElemT*                                    h_two,
+            const size_t&                                   h_two_size,
+            int                                             norbs,
+            int                                             bit_length,
+            size_t                                          vecSize
     );
 
     template<typename ElemT>
-    void DavidsonMatvecGPU(
-            DavidsonGpuContext<ElemT>&  ctx,
-            const std::vector<ElemT>&   Tvec,
-            std::vector<ElemT>&         Wb
-    );
+    void GPUKetVecH2D(gpuContext_t<ElemT> &ctx, const std::vector<ElemT> &Tvec);
 
+    template<typename ElemT>
+    void GPUVecH2D(gpuContext_t<ElemT> &ctx, const std::vector<ElemT> &Wb);
+
+    template<typename ElemT>
+    void GPUVecD2H(gpuContext_t<ElemT> &ctx, std::vector<ElemT> & Wb);
+
+    template<typename ElemT>
+    void GPUSpMV(gpuContext_t<ElemT> &ctx, int taskIdx);
 } // namespace cuda_impl
 
 #endif // HAMILTONIAN_KERNEL_H

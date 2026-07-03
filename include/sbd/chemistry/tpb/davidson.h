@@ -756,27 +756,31 @@ x = 0    1    2    3
 
         // PERSISTENT GPU ENVIRONMENT
 #ifdef KERNEL_EXCITATION
-        cuda_impl::DavidsonGpuContext<ElemT> gpu_ctx;
+        cuda_impl::gpuContext_t<ElemT> gpu_ctx;
 
         std::vector<uint64_t> dets_flat;
-        std::vector<int> csr_row_ptr;
-        std::vector<cuda_impl::excitation_t> csr_exc;
+        std::vector<std::vector<int>> row_vec;
+        std::vector<std::vector<cuda_impl::excitation_t>> exc_vec;
 
         int detWords;
-        cuda_impl::BuildCsrExcitations<ElemT>(
+        cuda_impl::BuildCsrExcitationsPerTask<ElemT>(
                 adets, bdets, helper, bit_length, norbs,
-                dets_flat, csr_row_ptr, csr_exc, detWords
+                dets_flat, row_vec, exc_vec, detWords
         );
-        cuda_impl::initializeDavidsonGPU<ElemT>(
-                gpu_ctx, mpi_rank_h,
-                dets_flat, detWords, csr_row_ptr, csr_exc,
-                I1.store.data(), I2.store.data(), I1.norbs, bit_length, W.size()
+
+        int device_select_rank = static_cast<int>(mpi_rank_b) * mpi_size_h + mpi_rank_h;
+        cuda_impl::initGpuContext<ElemT>(
+                gpu_ctx, device_select_rank, mpi_rank_h, mpi_size_h,
+                dets_flat, detWords, row_vec, exc_vec,
+                I1.store.data(), I1.store.size(),
+                I2.store.data(), I2.store.size(),
+                I1.norbs, bit_length, W.size()
         );
 #endif
 
         for (int it = 0; it < max_iteration; it++) {
 
-#pragma omp parallel for
+            #pragma omp parallel for
             for (size_t is = 0; is < W.size(); is++) {
                 C[0][is] = W[is];
             }

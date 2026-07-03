@@ -1,5 +1,6 @@
 #include "hamiltonian_kernel.h"
 #include <cuda_runtime.h>
+#include <stdexcept>
 
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE 256   // must be a multiple of WARP_SIZE (32)
@@ -8,87 +9,123 @@
 #define WARP_SIZE 32
 
 #define CUDA_CHECK(x)                                                    \
-    do {                                                                 \
+    try {                                                                \
         cudaError_t _err = (x);                                          \
         if (_err != cudaSuccess) {                                       \
             printf("CUDA error %s:%d  %s\n",                             \
                    __FILE__, __LINE__, cudaGetErrorString(_err));        \
             exit(_err);                                                  \
         }                                                                \
-    } while (0)
+    } catch (...) { printf("CUDA t error: %s:%d\n", __FILE__, __LINE__); }
 
 namespace cuda_impl {
+
     template<typename ElemT>
-    void DavidsonGpuContext<ElemT>::release() {
-        if (d_row_ptr)  { cudaFree(d_row_ptr);  d_row_ptr = nullptr;}
-        if (d_exc)      { cudaFree(d_exc);      d_exc = nullptr;    }
-        if (d_dets)     { cudaFree(d_dets);     d_dets = nullptr;   }
-        if (d_one)      { cudaFree(d_one);      d_one = nullptr;    }
-        if (d_two)      { cudaFree(d_two);      d_two = nullptr;    }
-        if (d_T)        { cudaFree(d_T);        d_T = nullptr;      }
-        if (d_Wb)       { cudaFree(d_Wb);       d_Wb = nullptr;     }
+    void gpuContext_t<ElemT>::release() {
+        for (auto p : d_row_ptr) if (p) cudaFree(p);
+        for (auto p : d_exc)     if (p) cudaFree(p);
+
+        d_row_ptr.clear(); d_exc.clear();
+
+        if (d_dets) { cudaFree(d_dets); d_dets = nullptr; }
+        if (d_one)  { cudaFree(d_one);  d_one  = nullptr; }
+        if (d_two)  { cudaFree(d_two);  d_two  = nullptr; }
+        if (d_T)    { cudaFree(d_T);    d_T    = nullptr; }
+        if (d_Wb)   { cudaFree(d_Wb);   d_Wb   = nullptr; }
     }
 
     template<typename ElemT>
-    void InitializeDavidsonGPU(
-            DavidsonGpuContext<ElemT> &ctx,
-            int rank,
+    void InitGpuContext(
+            gpuContext_t<ElemT> &ctx,
+            int rank_for_device,
+            int mpi_rank_h,
+            int mpi_size_h,
             const std::vector<uint64_t> &dets_flat,
             int detWords,
-            const std::vector<int> &csr_row_ptr,
-            const std::vector<excitation_t> &csr_exc,
+            const std::vector<std::vector<int>> &csr_row_ptr_per_task,
+            const std::vector<std::vector<excitation_t>> &csr_exc_per_task,
             const ElemT *h_one,
+            const size_t& h_one_size,
             const ElemT *h_two,
+            const size_t& h_two_size,
             int norbs,
             int bit_length,
             size_t vecSize
     ) {
         int numDevices = 0;
         CUDA_CHECK(cudaGetDeviceCount(&numDevices));
-        ctx.device = rank % numDevices;
+        ctx.device = rank_for_device % numDevices;
         CUDA_CHECK(cudaSetDevice(ctx.device));
 
-        ctx.detWords = detWords;
-        ctx.norbs = norbs;
+        ctx.detWords   = detWords;
+        ctx.norbs      = norbs;
         ctx.bit_length = bit_length;
-        ctx.nBras = static_cast<int>(csr_row_ptr.size()) - 1;
-        ctx.nExc = static_cast<int>(csr_exc.size());
-        ctx.vecSize = vecSize;
+        ctx.mpi_rank_h = mpi_rank_h;
+        ctx.mpi_size_h = mpi_size_h;
+        ctx.vecSize    = vecSize;
+        ctx.nTasks     = static_cast<int>(csr_row_ptr_per_task.size());
+        ctx.nBras      = (ctx.nTasks > 0)
+                         ? static_cast<int>(csr_row_ptr_per_task[0].size()) - 1
+                         : 0;
 
-        const size_t nPairs = static_cast<size_t>(norbs) * (norbs + 1) / 2;
-        const size_t twoSize = nPairs * (nPairs + 1) / 2;
+        ctx.d_row_ptr.assign(ctx.nTasks, nullptr);
+        ctx.d_exc.assign(ctx.nTasks, nullptr);
 
-        CUDA_CHECK(cudaMalloc(&ctx.d_row_ptr,
-                              csr_row_ptr.size() * sizeof(int)));
-        CUDA_CHECK(cudaMemcpy(ctx.d_row_ptr, csr_row_ptr.data(),
-                              csr_row_ptr.size() * sizeof(int),
+        for (int t = 0; t < ctx.nTasks; ++t) {
+            const auto &row_ptr = csr_row_ptr_per_task[t];
+            const auto &exc     = csr_exc_per_task[t];
+
+            CUDA_CHECK(cudaMalloc(&ctx.d_row_ptr[t], row_ptr.size() * sizeof(int)));
+            CUDA_CHECK(cudaMemcpy(ctx.d_row_ptr[t], row_ptr.data(),
+                                  row_ptr.size() * sizeof(int),
+                                  cudaMemcpyHostToDevice));
+
+            if (!exc.empty()) {
+                CUDA_CHECK(cudaMalloc(&ctx.d_exc[t], exc.size() * sizeof(excitation_t)));
+                CUDA_CHECK(cudaMemcpy(ctx.d_exc[t], exc.data(),
+                                      exc.size() * sizeof(excitation_t),
+                                      cudaMemcpyHostToDevice));
+            }
+        }
+
+        CUDA_CHECK(cudaMalloc(&ctx.d_dets, dets_flat.size() * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMemcpy(ctx.d_dets, dets_flat.data(), dets_flat.size() * sizeof(uint64_t),
                               cudaMemcpyHostToDevice));
 
-        CUDA_CHECK(cudaMalloc(&ctx.d_exc,
-                              csr_exc.size() * sizeof(excitation_t)));
-        CUDA_CHECK(cudaMemcpy(ctx.d_exc, csr_exc.data(),
-                              csr_exc.size() * sizeof(excitation_t),
+        CUDA_CHECK(cudaMalloc(&ctx.d_one, h_one_size * sizeof(ElemT)));
+        CUDA_CHECK(cudaMemcpy(ctx.d_one, h_one, h_one_size*sizeof(ElemT),
                               cudaMemcpyHostToDevice));
 
-        CUDA_CHECK(cudaMalloc(&ctx.d_dets,
-                              dets_flat.size() * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMemcpy(ctx.d_dets, dets_flat.data(),
-                              dets_flat.size() * sizeof(uint64_t),
+        CUDA_CHECK(cudaMalloc(&ctx.d_two, h_two_size * sizeof(ElemT)));
+        CUDA_CHECK(cudaMemcpy(ctx.d_two, h_two, h_two_size * sizeof(ElemT),
                               cudaMemcpyHostToDevice));
 
-        CUDA_CHECK(cudaMalloc(&ctx.d_one,
-                              static_cast<size_t>(norbs) * norbs * sizeof(ElemT)));
-        CUDA_CHECK(cudaMemcpy(ctx.d_one, h_one,
-                              static_cast<size_t>(norbs) * norbs * sizeof(ElemT),
-                              cudaMemcpyHostToDevice));
-
-        CUDA_CHECK(cudaMalloc(&ctx.d_two, twoSize * sizeof(ElemT)));
-        CUDA_CHECK(cudaMemcpy(ctx.d_two, h_two,
-                              twoSize * sizeof(ElemT),
-                              cudaMemcpyHostToDevice));
-
-        CUDA_CHECK(cudaMalloc(&ctx.d_T, vecSize * sizeof(ElemT)));
+        CUDA_CHECK(cudaMalloc(&ctx.d_T,  vecSize * sizeof(ElemT)));
         CUDA_CHECK(cudaMalloc(&ctx.d_Wb, vecSize * sizeof(ElemT)));
+    }
+
+    template<typename ElemT>
+    void GPUKetVecH2D(gpuContext_t<ElemT> &ctx, const std::vector<ElemT> &Tvec) {
+        CUDA_CHECK(cudaSetDevice(ctx.device));
+        CUDA_CHECK(cudaMemcpy(ctx.d_T, Tvec.data(),
+                              ctx.vecSize * sizeof(ElemT),
+                              cudaMemcpyHostToDevice));
+    }
+
+    template<typename ElemT>
+    void GPUVecH2D(gpuContext_t<ElemT> &ctx, const std::vector<ElemT> &Wb) {
+        CUDA_CHECK(cudaSetDevice(ctx.device));
+        CUDA_CHECK(cudaMemcpy(ctx.d_Wb, Wb.data(),
+                              ctx.vecSize * sizeof(ElemT),
+                              cudaMemcpyHostToDevice));
+    }
+
+    template<typename ElemT>
+    void GPUVecD2H(gpuContext_t<ElemT> &ctx, std::vector<ElemT> &Wb) {
+        CUDA_CHECK(cudaSetDevice(ctx.device));
+        CUDA_CHECK(cudaMemcpy(Wb.data(), ctx.d_Wb,
+                              ctx.vecSize * sizeof(ElemT),
+                              cudaMemcpyDeviceToHost));
     }
 
     template<typename ElemT>
@@ -208,19 +245,8 @@ namespace cuda_impl {
         const int A = min(a, b);
         const int B = max(a, b);
 
-        sgn *= parity(
-                det,
-                bit_length,
-                min(I, A),
-                max(I, A)
-        );
-
-        sgn *= parity(
-                det,
-                bit_length,
-                min(J, B),
-                max(J, B)
-        );
+        sgn *= parity(det, bit_length, min(I, A), max(I, A));
+        sgn *= parity(det, bit_length, min(J, B), max(J, B));
 
         if (A > J || B < I)
             sgn *= -1.0;
@@ -238,7 +264,9 @@ namespace cuda_impl {
             DeviceTwoInt<ElemT> h2,
             int bit_length,
             int detWords,
-            int nBras
+            int nBras,
+            int mpi_size_h,
+            int mpi_rank_h
     ) {
         const int globalThread = blockIdx.x * blockDim.x + threadIdx.x;
         const int warpId = globalThread / WARP_SIZE;
@@ -247,8 +275,12 @@ namespace cuda_impl {
         if (warpId >= nBras) return;
 
         const int braIdx = warpId;
+
+        if ((braIdx % mpi_size_h) != mpi_rank_h) return;
+
         const int start = row_ptr[braIdx];
         const int end = row_ptr[braIdx + 1];
+        if (start == end) return;
 
         const uint64_t *det = dets + static_cast<ptrdiff_t>(braIdx) * detWords;
 
@@ -265,7 +297,7 @@ namespace cuda_impl {
             lane_sum += val * Tvec[e.ketIdx];
         }
 
-#pragma unroll
+        #pragma unroll
         for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
             lane_sum += __shfl_down_sync(0xFFFFFFFF, lane_sum, offset);
 
@@ -274,18 +306,10 @@ namespace cuda_impl {
     }
 
     template<typename ElemT>
-    void DavidsonMatvecGPU(
-            DavidsonGpuContext<ElemT> &ctx,
-            const std::vector<ElemT> &Tvec,
-            std::vector<ElemT> &Wb
-    ) {
+    void GPUSpMV(gpuContext_t<ElemT> &ctx, int taskIdx) {
         CUDA_CHECK(cudaSetDevice(ctx.device));
 
-        CUDA_CHECK(cudaMemcpy(ctx.d_T, Tvec.data(),
-                              ctx.vecSize * sizeof(ElemT),
-                              cudaMemcpyHostToDevice));
-
-        CUDA_CHECK(cudaMemset(ctx.d_Wb, 0, ctx.vecSize * sizeof(ElemT)));
+        if (ctx.d_exc[taskIdx] == nullptr) return;
 
         DeviceOneInt<ElemT> dH1{ctx.d_one, ctx.norbs};
         DeviceTwoInt<ElemT> dH2{ctx.d_two, ctx.norbs};
@@ -294,8 +318,8 @@ namespace cuda_impl {
         const int grid = (totalThreads + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
         csr_matvec_kernel<ElemT><<<grid, BLOCK_SIZE>>>(
-                ctx.d_row_ptr,
-                ctx.d_exc,
+                ctx.d_row_ptr[taskIdx],
+                ctx.d_exc[taskIdx],
                 ctx.d_dets,
                 ctx.d_T,
                 ctx.d_Wb,
@@ -303,42 +327,38 @@ namespace cuda_impl {
                 dH2,
                 ctx.bit_length,
                 ctx.detWords,
-                ctx.nBras
+                ctx.nBras,
+                ctx.mpi_size_h,
+                ctx.mpi_rank_h
         );
 
         CUDA_CHECK(cudaDeviceSynchronize());
-        std::vector<ElemT> gpu_result(ctx.vecSize);
-        CUDA_CHECK(cudaMemcpy(gpu_result.data(), ctx.d_Wb,
-                              ctx.vecSize * sizeof(ElemT),
-                              cudaMemcpyDeviceToHost));
-        for (size_t i = 0; i < ctx.vecSize; ++i)
-            Wb[i] += gpu_result[i];
     }
 
-
-}
+} // namespace cuda_impl
 
 // explicit instantiation of double template for separable compilation
 namespace cuda_impl {
-    template void DavidsonGpuContext<double>::release();
+    template void gpuContext_t<double>::release();
 
-    template void InitializeDavidsonGPU<double>(
-            DavidsonGpuContext<double> &,
-            int,
+    template void InitGpuContext<double>(
+            gpuContext_t<double> &,
+            int, int, int,
             const std::vector<uint64_t> &,
             int,
-            const std::vector<int> &,
-            const std::vector<excitation_t> &,
+            const std::vector<std::vector<int>> &,
+            const std::vector<std::vector<excitation_t>> &,
             const double *,
+            const size_t&,
             const double *,
+            const size_t&,
             int,
             int,
             size_t
     );
 
-    template void DavidsonMatvecGPU<double>(
-            DavidsonGpuContext<double> &,
-            const std::vector<double> &,
-            std::vector<double> &
-    );
+    template void GPUKetVecH2D<double>(gpuContext_t<double> &, const std::vector<double> &);
+    template void GPUVecH2D<double>(gpuContext_t<double> &, const std::vector<double> &);
+    template void GPUVecD2H<double>(gpuContext_t<double> &, std::vector<double> &);
+    template void GPUSpMV<double>(gpuContext_t<double> &, int);
 }
